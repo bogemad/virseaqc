@@ -1,0 +1,7 @@
+#!/bin/bash
+
+input=$1
+host_genome_index=$2
+output=$3
+
+bowtie2 --threads 1 -x $host_genome_index -U $input | samtools view -f 4 | samtools bam2fq > $output.host_filtered.fastq
