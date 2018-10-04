@@ -90,7 +90,7 @@ class Virseaqc():
 			cmds = [ [
 					'cutadapt',
 					'-a', 'file:{}'.format(self.adapters),
-					'-o', os.path.join(self.adapter_trimmed_dir, "{}.host_filtered_adapter_trimmed.fastq".format(get_sample_name(reads)))
+					'-o', os.path.join(self.adapter_trimmed_dir, "{}.host_filtered_adapter_trimmed.fastq".format(get_sample_name(reads))),
 					os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq".format(get_sample_name(reads)))
 					] 
 					for reads in not_done 
