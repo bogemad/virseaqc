@@ -10,17 +10,19 @@ class Virseaqc():
 		self.db = db
 		self.reads_dir = reads_dir
 		self.reads_list = [ os.path.join(reads_dir, reads) for reads in os.listdir(reads_dir) if (os.path.isfile(os.path.join(reads_dir, reads)) and reads.endswith(('.fastq', '.fastq.gz', '.fq', '.fq.gz')))]
-		self.threads = str(threads if threads < len(self.reads_list) else len(self.reads_list))
+		self.max_threads = str(threads)
+		self.application_threads = str(max(min(4, threads), threads/len(self.reads_list))) #Thanks T. Seeman
+		self.parallel_job_limit = str(min(len(self.reads_list), threads/int(self.application_threads)))
+		logging.info("Optimizing number of threads per parallel job...")
+		logging.info("Using {} threads in {} jobs simultaneously.".format(self.application_threads, self.parallel_job_limit))
 		self.outdir = outdir
 		self.fastqc_dir = os.path.join(outdir, 'qc_plots', 'fastqc')
 		self.reference_files = os.path.join(outdir, 'reference_sequence_files')
 		self.host_filtered_reads = os.path.join(outdir, 'host_filtered_reads')
 		self.adapter_trimmed_dir = os.path.join(outdir, 'host_filtered_and_adapter_trimmed_reads')
 		self.raw_ass_dir = os.path.join(outdir, 'raw_assemblies')
-		self.blobtools_dir = os.path.join(outdir, 'qc_plots', 'blobtools')
+		self.blobtools_dir = os.path.join(outdir, 'blast_output')
 		self.temp_dir = os.path.join(outdir, '.temp')
-		self.successful = defaultdict(list)
-		self.failed = defaultdict(list)
 		self.verbosity = verbosity
 		self.host_genome = host_genome
 		self.host_genome_index = os.path.join(self.reference_files, 'host_genome_index')
@@ -32,7 +34,6 @@ class Virseaqc():
 		os.makedirs(self.temp_dir)
 	
 	def build_host_db(self):
-		sample_name = get_sample_name(reads)
 		make_outdirs(self.reference_files)
 		outputs = [
 					'{}.1.bt2'.format(self.host_genome_index), 
@@ -46,7 +47,7 @@ class Virseaqc():
 			logging.info("Building host genome bowtie2 index...")
 			exitcode = run_command([
 									'bowtie2-build',
-									'--threads', self.threads,
+									'--threads', self.max_threads,
 									self.host_genome,
 									self.host_genome_index
 									])
@@ -63,14 +64,15 @@ class Virseaqc():
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq".format(get_sample_name(reads)))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
 			logging.info("Found {} reads without host read filtering. Starting bowtie2...".format(len(not_done)))
-			cmds = [ [
+			cmds = [ ' '.join([
 					'virseaqc_filter_host_reads',
 					reads,
 					self.host_genome_index,
-					get_sample_name(reads)
-					] for reads in not_done 
+					os.path.join(self.host_filtered_reads, get_sample_name(reads)),
+					self.application_threads
+					]) for reads in not_done 
 					]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
+			exitcode = run_command(['parallel', '-j{}'.format(self.parallel_job_limit), ':::'] + cmds)
 			if exitcode == 0:
 				logging.info("Host read filtering completed successfully.")
 			else:
@@ -87,15 +89,16 @@ class Virseaqc():
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.adapter_trimmed_dir, "{}.host_filtered_adapter_trimmed.fastq".format(get_sample_name(reads)))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
 			logging.info("Found {} reads without adapter trimming. Starting cutadapt...".format(len(not_done)))
-			cmds = [ [
+			cmds = [ ' '.join([
 					'cutadapt',
+					'-j', self.application_threads,
 					'-a', 'file:{}'.format(self.adapters),
 					'-o', os.path.join(self.adapter_trimmed_dir, "{}.host_filtered_adapter_trimmed.fastq".format(get_sample_name(reads))),
 					os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq".format(get_sample_name(reads)))
-					] 
+					]) 
 					for reads in not_done 
 					]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
+			exitcode = run_command(['parallel', '-j{}'.format(self.parallel_job_limit), ':::'] + cmds)
 			if exitcode == 0:
 				logging.info("Adapter removal completed successfully.")
 			else:
@@ -109,20 +112,20 @@ class Virseaqc():
 	
 	def run_fastqc(self):
 		make_outdirs(self.fastqc_dir)
-		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.fastqc_dir, "{}_fastqc.html".format(get_sample_name(reads)))) ]
-		if len(not_done) > 0 and len(self.reads_list) > 0:
-			logging.info("Found {} reads without fastqc reports. Starting fastqc...".format(len(not_done))) 
+		trimmed_not_done = [ os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq".format(get_sample_name(reads))) for reads in self.reads_list if not os.path.isfile(os.path.join(self.fastqc_dir, "{}.host_filtered_fastqc.html".format(get_sample_name(reads)))) ]
+		if len(trimmed_not_done) > 0 and len(self.reads_list) > 0:
+			logging.info("Found {} reads without fastqc reports. Starting fastqc...".format(len(trimmed_not_done))) 
 			exitcode = run_command([
-									'parallel', '-j{}'.format(self.threads),
+									'parallel', '-j{}'.format(self.max_threads),
 									'fastqc',
 									'--outdir={}'.format(self.fastqc_dir),
-									'{}', ':::'] + not_done)
+									'{}', ':::'] + trimmed_not_done)
 			if exitcode == 0:
 				logging.info("fastqc reports generated successfully.")
 			else:
 				logging.error("fastqc failed. See logfile virseaqc.log in your output directory for more details.")
 				sys.exit(1)
-		elif len(not_done) == 0 and len(self.reads_list) > 0:
+		elif len(trimmed_not_done) == 0 and len(self.reads_list) > 0:
 			logging.info("fastqc reports detected for all samples. Skipping fastqc and continuing to next step...")
 		else:
 			logging.info("No reads found in {}. Please check that the -q|--fastq-dir option is correct.".format(self.reads_dir))
@@ -130,79 +133,86 @@ class Virseaqc():
 	
 	def assemble_reads(self):
 		make_outdirs(self.raw_ass_dir)
-		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta')) ]
-		if len(not_done) > 0 and len(self.reads_list) > 0:
-			logging.info("Found {} reads without assemblies. Starting SPAdes...".format(len(not_done)))
-			null = ( shutil.rmtree(os.path.join(self.raw_ass_dir, get_sample_name(reads))) for reads in not_done if os.path.isdir(os.path.join(self.raw_ass_dir, get_sample_name(reads))) )
-			cmds = [ [
+		trimmed_not_done = [ os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq".format(get_sample_name(reads))) for reads in self.reads_list if not os.path.isfile(os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta')) ]
+		if len(trimmed_not_done) > 0 and len(self.reads_list) > 0:
+			logging.info("Found {} reads without assemblies. Starting SPAdes...".format(len(trimmed_not_done)))
+			null = ( shutil.rmtree(os.path.join(self.raw_ass_dir, get_sample_name(reads))) for reads in trimmed_not_done if os.path.isdir(os.path.join(self.raw_ass_dir, get_sample_name(reads))) )
+			cmds = [ ' '.join([
 						'spades.py',
 						'--careful',
-						'--se', reads,
-						'-t', '1',
+						'-s', reads,
+						'-t', self.application_threads,
 						'-m', self.mem,
 						'-k', kmer_calc(reads),
 						'--cov-cutoff', 'auto',
 						'-o', os.path.join(self.raw_ass_dir, get_sample_name(reads))
-						] 
-						for reads in not_done ]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
-			not_done_again = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta')) ]
-			if not_done_again > 0:
-				logging.info("{} reads did not assemble using SPAdes with the --careful option. Retrying SPAdes assemblies without --careful option...".format(len(not_done_again)))
-				null = ( shutil.rmtree(os.path.join(self.raw_ass_dir, get_sample_name(reads))) for reads in not_done if os.path.isdir(os.path.join(self.raw_ass_dir, get_sample_name(reads))) )
-				cmds = [ [
+						]) 
+						for reads in trimmed_not_done ]
+			exitcode = run_command(['parallel', '-j{}'.format(self.parallel_job_limit), ':::'] + cmds)
+			trimmed_not_done_again = [ os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq".format(get_sample_name(reads))) for reads in self.reads_list if not os.path.isfile(os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta')) ]
+			if trimmed_not_done_again > 0:
+				logging.info("{} reads did not assemble using SPAdes with the --careful option. Retrying SPAdes assemblies without --careful option...".format(len(trimmed_not_done_again)))
+				null = ( shutil.rmtree(os.path.join(self.raw_ass_dir, get_sample_name(reads))) for reads in trimmed_not_done_again if os.path.isdir(os.path.join(self.raw_ass_dir, get_sample_name(reads))) )
+				cmds = [ ' '.join([
 							'spades.py',
-							'--se', reads,
-							'-t', '1',
+							'-s', reads,
+							'-t', self.application_threads,
 							'-m', self.mem,
 							'-k', kmer_calc(reads),
 							'--cov-cutoff', 'auto',
 							'-o', os.path.join(self.raw_ass_dir, get_sample_name(reads))
-							] 
-							for reads in not_done ]
-				exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
+							] )
+							for reads in trimmed_not_done_again ]
+				exitcode = run_command(['parallel', '-j{}'.format(self.parallel_job_limit), ':::'] + cmds)
 			if exitcode == 0:
 				logging.info("Genome assembly completed successfully for all samples.")
 			else:
 				logging.error("Genome assembly failed for one or more samples. See logfile virseaqc.log in your output directory for more details.")
 				sys.exit(1)
+		elif len(trimmed_not_done) == 0 and len(self.reads_list) > 0:
+			logging.info("Assemblies detected for all samples. Skipping spades assembly and continuing to next step...")
+		else:
+			logging.info("No reads found in {}. Please check that the -q|--fastq-dir option is correct.".format(self.reads_dir))
+			sys.exit(1)
 		
 	def run_blastn(self):
-		null = (make_outdirs(os.path.join(self.blobtools_dir, get_sample_name(reads))) for reads in self.reads_list)
+		make_outdirs(self.blobtools_dir)
+		for reads in self.reads_list:
+			make_outdirs(os.path.join(self.blobtools_dir, get_sample_name(reads)))
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blast_hits'.format(get_sample_name(reads)))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
 			logging.info("Searching nt database with blastn...")
-			cmds = [ [
-						'blastn', 
-						'-query', os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta'),
-						'-db', self.db,
-						'-outfmt', '6 qseqid staxids bitscore std',
-						'-max_target_seqs', '10',
-						'-max_hsps', '1',
-						'-evalue', '1e-25',
-						'-num_threads', '1',
-						'-out', os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blast_hits'.format(get_sample_name(reads)))
-						] for reads in self.reads_list ]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
-			if exitcode == 0:
-				logging.info("BLAST searches completed successfully for all samples.")
-			else:
-				logging.error("BLAST searches failed for one or more samples. See logfile virseaqc.log in your output directory for more details.")
-				sys.exit(1)
+			for reads in not_done:
+				exitcode = run_command([
+										'blastn', 
+										'-query', os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta'),
+										'-db', self.db,
+										'-outfmt', '6 qseqid staxids bitscore std',
+										'-max_target_seqs', '10',
+										'-max_hsps', '1',
+										'-evalue', '1e-25',
+										'-num_threads', self.max_threads,
+										'-out', os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blast_hits'.format(get_sample_name(reads)))
+										])
+				if exitcode == 0:
+					logging.info("BLAST searches completed successfully for sample {}.".format(get_sample_name(reads)))
+				else:
+					logging.error("BLAST searches failed for sample {}. See logfile virseaqc.log in your output directory for more details.".format(get_sample_name(reads)))
+					sys.exit(1)
 	
 	def run_bt_create(self, reads):
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blobDB.json'.format(get_sample_name(reads)))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
 			logging.info("Running blobtools for summaries and graphical output...")
-			cmds = [ [
+			cmds = [ ' '.join([
 						'blobtools', 'create',
 						'-i', os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta'), 
 						'-y', 'spades',
 						'-t', os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blast_hits'.format(get_sample_name(reads))),
 						'-x', 'bestsumorder',
 						'-o', os.path.join(self.blobtools_dir, get_sample_name(reads), get_sample_name(reads))
-						] for reads in self.reads_list ]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
+						]) for reads in self.reads_list ]
+			exitcode = run_command(['parallel', '-j{}'.format(self.max_threads), ':::'] + cmds)
 			if exitcode != 0:
 				logging.error("blobtools failed for one or more samples. See logfile virseaqc.log in your output directory for more details.")
 				sys.exit(1)
@@ -210,15 +220,15 @@ class Virseaqc():
 	def run_bt_view(self, reads):
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blobDB.bestsumorder.table.txt'.format(get_sample_name(reads)))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
-			cmds = [ [
+			cmds = [ ' '.join([
 						'blobtools', 'view',
 						'-i', os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blobDB.json'.format(get_sample_name(reads))),
 						'-x', 'bestsumorder',
 						'-r', 'species',
 						'-b',
 						'-o', os.path.join(self.blobtools_dir, get_sample_name(reads), get_sample_name(reads))
-						] for reads in self.reads_list ]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
+						]) for reads in self.reads_list ]
+			exitcode = run_command(['parallel', '-j{}'.format(self.max_threads), ':::'] + cmds)
 			if exitcode != 0:
 				logging.error("blobtools failed for one or more samples. See logfile virseaqc.log in your output directory for more details.")
 				sys.exit(1)
@@ -226,15 +236,15 @@ class Virseaqc():
 	def run_bt_plot_genus(self, reads):
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.bestsumorder.genus.p7.span.100.blobplot.spades.png'.format(blobdb_file))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
-			cmds = [ [
+			cmds = [ ' '.join([
 						'blobtools', 'plot',
 						'-i', os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blobDB.json'.format(get_sample_name(reads))),
 						'-x', 'bestsumorder',
 						'-r', 'genus',
 						'-l', '100',
 						'-o', os.path.join(self.blobtools_dir, get_sample_name(reads), get_sample_name(reads))
-						] for reads in self.reads_list ]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
+						]) for reads in self.reads_list ]
+			exitcode = run_command(['parallel', '-j{}'.format(self.max_threads), ':::'] + cmds)
 			if exitcode != 0:
 				logging.error("blobtools failed for one or more samples. See logfile virseaqc.log in your output directory for more details.")
 				sys.exit(1)
@@ -242,15 +252,15 @@ class Virseaqc():
 	def run_bt_plot_species(self, reads):
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.bestsumorder.species.p7.span.100.blobplot.spades.png'.format(blobdb_file))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
-			cmds = [ [
+			cmds = [ ' '.join([
 						'blobtools', 'plot',
 						'-i', os.path.join(self.blobtools_dir, get_sample_name(reads), '{}.blobDB.json'.format(get_sample_name(reads))),
 						'-x', 'bestsumorder',
 						'-r', 'genus',
 						'-l', '100',
 						'-o', os.path.join(self.blobtools_dir, get_sample_name(reads), get_sample_name(reads))
-						] for reads in self.reads_list ]
-			exitcode = run_command(['parallel', '-j{}'.format(self.threads), ':::'] + cmds)
+						]) for reads in self.reads_list ]
+			exitcode = run_command(['parallel', '-j{}'.format(self.max_threads), ':::'] + cmds)
 			if exitcode != 0:
 				logging.error("blobtools failed for one or more samples. See logfile virseaqc.log in your output directory for more details.")
 				sys.exit(1)
@@ -283,10 +293,10 @@ def kmer_calc(reads):
 	reads_handle.close()
 	run_ks = []
 	for k in [21,33,55,77,99,127]:
-		run_ks.append(str(k))
-		if k > (max_read_len/2):
-			logging.info("{}: Running spades with kmers {}".format(sample_name, ",".join(run_ks)))
-			return ','.join(run_ks)
+		if k < (max_read_len/2):
+			run_ks.append(str(k))
+	logging.info("{}: Running spades with kmers {}".format(sample_name, ",".join(run_ks)))
+	return ','.join(run_ks)
 
 def check_multiple_outputs(outputs):
 	for output in outputs:
@@ -298,6 +308,9 @@ def get_sample_name(reads):
 	name, suffix = os.path.splitext(os.path.basename(reads))
 	if suffix == '.gz':
 		name, suffix = os.path.splitext(name)
+	name2, suffix = os.path.splitext(os.path.basename(name))
+	if suffix == '.host_filtered' or suffix == '.host_filtered_adapter_trimmed':
+		return name2
 	return name
 
 
@@ -312,7 +325,10 @@ def make_outdirs(dir):
 
 
 def run_command(cmd, shell_opt=False):
-	logging.info("Executing command: {}".format(" ".join(cmd)))
+	if shell_opt == True:
+		logging.info("Executing command: {}".format(cmd))
+	else:
+		logging.info("Executing command: {}".format(" ".join(cmd)))
 	process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=shell_opt)
 	with process.stdout:
 		log_subprocess_output(process.stdout)
@@ -338,11 +354,11 @@ def configure_outdir(outdir, force):
 	else:
 		os.makedirs(outdir)
 
-def run(threads, mem, reads_dir, force, outdir, verbosity, db):
+def run(threads, mem, reads_dir, force, outdir, verbosity, db, host_genome, adapters):
 	configure_outdir(outdir, force)
 	configure_logs(verbosity, outdir)
 	logging.info("Beginning virseaqc run...")
-	job = Virseaqc(threads, mem, db, reads_dir, outdir, verbosity)
+	job = Virseaqc(threads, mem, db, reads_dir, outdir, verbosity, host_genome, adapters)
 	if force == True:
 		logging.info("Force option given. Deleting previous run...")
 	logging.info("Log for the current run can be found at {}.".format(os.path.join(outdir, 'logs')))
