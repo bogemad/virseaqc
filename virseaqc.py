@@ -91,14 +91,13 @@ class Virseaqc():
 			logging.info("Found {} reads without adapter trimming. Starting cutadapt...".format(len(not_done)))
 			cmds = [ ' '.join([
 					'cutadapt',
-					'-j', self.application_threads,
 					'-a', 'file:{}'.format(self.adapters),
 					'-o', os.path.join(self.adapter_trimmed_dir, "{}.host_filtered_adapter_trimmed.fastq".format(get_sample_name(reads))),
 					os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq".format(get_sample_name(reads)))
 					]) 
 					for reads in not_done 
 					]
-			exitcode = run_command(['parallel', '-j{}'.format(self.parallel_job_limit), ':::'] + cmds)
+			exitcode = run_command(['parallel', '-j{}'.format(self.max_threads), ':::'] + cmds)
 			if exitcode == 0:
 				logging.info("Adapter removal completed successfully.")
 			else:
