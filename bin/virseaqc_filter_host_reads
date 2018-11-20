@@ -5,4 +5,4 @@ host_genome_index=$2
 output=$3
 threads=$4
 
-bowtie2 --threads $threads -x $host_genome_index -U $input | samtools view -f 4 | samtools bam2fq - > $output.host_filtered.fastq
+bowtie2 --threads $threads -x $host_genome_index -U $input | samtools view -f 4 | samtools bam2fq - | gzip -c > $output.host_filtered.fastq.gz
