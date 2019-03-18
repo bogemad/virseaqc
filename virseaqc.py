@@ -1,7 +1,8 @@
 #!/usr/bin/env python2
 
-import sys, os, subprocess, multiprocessing, logging, shutil, gzip, re
+import sys, os, subprocess, multiprocessing, logging, shutil, gzip, re, ftplib
 from StringIO import StringIO
+from Bio import SeqIO
 from collections import defaultdict
 
 class Virseaqc():
@@ -19,6 +20,7 @@ class Virseaqc():
 		self.intermediate_files = os.path.join(outdir, 'intermediate_files')
 		# self.fastqc_dir = os.path.join(outdir, 'fastqc_reads_quality_control')
 		self.reference_files = os.path.join(self.intermediate_files, 'reference_sequence_files')
+		self.databases = os.path.join(self.intermediate_files, 'databases')
 		self.host_filtered_reads = os.path.join(self.intermediate_files, 'host_filtered_reads')
 		# self.adapter_trimmed_dir = os.path.join(outdir, 'host_filtered_and_adapter_trimmed_reads')
 		self.raw_ass_dir = os.path.join(self.intermediate_files, 'raw_assembly_output')
@@ -62,6 +64,23 @@ class Virseaqc():
 		else:
 			logging.info("Host genome index detected. Skipping host genome index build and continuing to next step...")
 	
+	def build_viral_db(self):
+		make_outdirs(self.databases)
+		logging.info("Building viral genome blast database...")
+		download_multipart_db('refseq/release/viral/', 'viral.{}.protein.faa.gz')
+		with open(os.path.join(self.databases, 'viral.protein.faa'), 'wb') as outfile:
+			for file in os.listdir('.'):
+				if file.endswith('.protein.faa.gz') and file.startswith('viral.'):
+					with gzip.open(file, 'rb') as infile:
+						shutil.copyfileobj(infile, outfile)
+					os.remove(file)
+		exitcode = run_command(['diamond', 'makedb', '--in', os.path.join(self.databases, 'viral.protein.faa'), '-d', os.path.join(self.databases, 'viraldb')])
+		if exitcode == 0:
+			logging.info("Viral genome blast database built successfully.")
+		else:
+			logging.error("Viral genome blast database building failed. See logfile virseaqc.log in your output directory for more details.")
+			sys.exit(1)
+	
 	def filter_host_reads(self):
 		make_outdirs(self.host_filtered_reads)
 		for reads in self.reads_list:
@@ -69,20 +88,20 @@ class Virseaqc():
 		not_done = [ reads for reads in self.reads_list if not os.path.isfile(os.path.join(self.host_filtered_reads, "{}.host_filtered.fastq.gz".format(get_sample_name(reads)))) ]
 		if len(not_done) > 0 and len(self.reads_list) > 0:
 			logging.info("Found {} reads without host read filtering. Starting bowtie2...".format(len(not_done)))
-			cmds = [ ' '.join([
-					'virseaqc_filter_host_reads',
-					reads,
-					self.host_genome_index,
-					os.path.join(self.host_filtered_reads, get_sample_name(reads)),
-					self.application_threads
-					]) for reads in not_done 
-					]
-			exitcode = run_command(['parallel', '-j{}'.format(self.parallel_job_limit), ':::'] + cmds)
-			if exitcode == 0:
-				logging.info("Host read filtering completed successfully.")
-			else:
-				logging.error("Host read filtering failed. See logfile virseaqc.log in your output directory for more details.")
-				sys.exit(1)
+			for reads in not_done:
+				logging.info("Filtering host reads from sample {}...".format(get_sample_name(reads)))
+				exitcode = run_command([
+										'virseaqc_filter_host_reads',
+										reads,
+										self.host_genome_index,
+										os.path.join(self.host_filtered_reads, get_sample_name(reads)),
+										self.max_threads
+										])
+				if exitcode == 0:
+					logging.info("Host read filtering completed successfully.")
+				else:
+					logging.error("Host read filtering failed. See logfile virseaqc.log in your output directory for more details.")
+					sys.exit(1)
 		elif len(not_done) == 0 and len(self.reads_list) > 0:
 			logging.info("Host filtered reads detected for all samples. Skipping host read filtering and continuing to next step...")
 		else:
@@ -138,6 +157,60 @@ class Virseaqc():
 			logging.info("No reads found in {}. Please check that the -q|--fastq-dir option is correct.".format(self.reads_dir))
 			sys.exit(1)
 	
+	def run_diamond(self):
+		make_outdirs(self.blast_dir)
+		trimmed_not_done = [ os.path.join(self.outdir, get_sample_name(reads), "{}.host_filtered_adapter_trimmed.fastq.gz".format(get_sample_name(reads))) for reads in self.reads_list if not os.path.isfile(os.path.join(self.outdir, get_sample_name(reads), '{}.virus_classification.html'.format(get_sample_name(reads)))) ]
+		print(trimmed_not_done)
+		if len(trimmed_not_done) > 0 and len(self.reads_list) > 0:
+			logging.info("Found {} reads without viral ID. Starting diamond...".format(len(trimmed_not_done)))
+			for reads in trimmed_not_done:
+				logging.info("Identifying viral reads from sample {}...".format(get_sample_name(reads)))
+				fasta_path = convert_fastq_to_fasta(reads, self.blast_dir)
+				outfile_path = os.path.join(self.blast_dir, '{}.daa'.format(get_sample_name(reads)))
+				outfile_blast = os.path.join(self.blast_dir, '{}.dmnd.blast'.format(get_sample_name(reads)))
+				outfile_krona = os.path.join(self.outdir, get_sample_name(reads), '{}.virus_classification.html'.format(get_sample_name(reads)))
+				exitcode = run_command([
+										'diamond',
+										'blastx',
+										'-d', os.path.join(self.databases, 'viraldb'),
+										'-f', '100',
+										'--threads', self.max_threads,
+										'--salltitles',
+										'-k', '1',
+										'-q', fasta_path,
+										'-o', outfile_path
+										])
+				if exitcode != 0:
+					logging.error("Diamond BLAST failed. See logfile virseaqc.log in your output directory for more details.")
+					sys.exit(1)
+				exitcode = run_command([
+										'diamond',
+										'view',
+										'-a', outfile_path,
+										'-o', outfile_blast
+										])
+				if exitcode != 0:
+					logging.error("Diamond BLAST file conversion failed. See logfile virseaqc.log in your output directory for more details.")
+					sys.exit(1)
+				exitcode = run_command([
+										'ktImportBLAST',
+										'-i',
+										'-p',
+										'-o', outfile_krona,
+										outfile_blast
+										])
+				if exitcode == 0:
+					logging.info("Viral ID successful.")
+				else:
+					logging.error("Viral ID failed. See logfile virseaqc.log in your output directory for more details.")
+					sys.exit(1)
+		elif len(trimmed_not_done) == 0 and len(self.reads_list) > 0:
+			logging.info("Viral IDs detected for all samples. Skipping diamond and continuing to next step...")
+		else:
+			logging.info("No reads found in {}. Please check that the -q|--fastq-dir option is correct.".format(self.reads_dir))
+			sys.exit(1)
+	
+
 	def assemble_reads(self):
 		make_outdirs(self.raw_ass_dir)
 		trimmed_not_done = [ os.path.join(self.outdir, get_sample_name(reads), "{}.host_filtered_adapter_trimmed.fastq.gz".format(get_sample_name(reads))) for reads in self.reads_list if not os.path.isfile(os.path.join(self.raw_ass_dir, get_sample_name(reads), 'scaffolds.fasta')) ]
@@ -147,6 +220,7 @@ class Virseaqc():
 			cmds = [ ' '.join([
 						'spades.py',
 						'--careful',
+						'--iontorrent',
 						'-s', reads,
 						'-t', self.application_threads,
 						'-m', self.mem,
@@ -162,6 +236,7 @@ class Virseaqc():
 				null = ( shutil.rmtree(os.path.join(self.raw_ass_dir, get_sample_name(reads))) for reads in trimmed_not_done_again if os.path.isdir(os.path.join(self.raw_ass_dir, get_sample_name(reads))) )
 				cmds = [ ' '.join([
 							'spades.py',
+							'--iontorrent',
 							'-s', reads,
 							'-t', self.application_threads,
 							'-m', self.mem,
@@ -289,9 +364,11 @@ class Virseaqc():
 	
 	def run_pipeline(self):
 		self.build_host_db()
+		self.build_viral_db()
 		self.filter_host_reads()
 		self.trim_adapters()
 		self.run_fastqc()
+		self.run_diamond()
 		self.assemble_reads()
 		self.run_blastn()
 		self.run_bt_create()
@@ -375,6 +452,28 @@ def configure_outdir(outdir, force):
 			os.makedirs(outdir)
 	else:
 		os.makedirs(outdir)
+
+def download_multipart_db(path, filename):
+	ftp = ftplib.FTP('ftp.ncbi.nlm.nih.gov')
+	ftp.login("anonymous", "daniel.bogema@dpi.nsw.gov.au")
+	ftp.cwd(path)
+	file_num = 0
+	while True:
+		try:
+			file_num += 1
+			file = filename.format(file_num)
+			ftp.retrbinary("RETR " + file, open(file, 'wb').write)
+		except ftplib.error_perm:
+			os.remove(file)
+			break
+
+def convert_fastq_to_fasta(fastq_file, output_dir):
+	sample_name = get_sample_name(fastq_file)
+	recs = SeqIO.parse(open_reads(fastq_file), 'fastq')
+	fasta_path = os.path.join(output_dir, '{}.fasta'.format(sample_name))
+	null = SeqIO.write(recs, fasta_path, 'fasta')
+	return fasta_path
+
 
 def run(threads, mem, reads_dir, force, outdir, verbosity, db, host_genome, adapters):
 	configure_outdir(outdir, force)
