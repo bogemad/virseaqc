@@ -8,12 +8,14 @@ parser = argparse.ArgumentParser(description="virseaqc - A combined pipeline for
 optional = parser._action_groups.pop()
 required = parser.add_argument_group('required arguments')
 
-required.add_argument("-q", "--fastq-dir", required=True, help="Path to a directory with your ion-torrent or single end fastq files.", action="store", dest="reads_dir")
-required.add_argument("-o", "--output-directory", required=True, help="Path to the output directory. A directory will be created if one does not exist.", action="store", dest="outdir")
-required.add_argument("-b", "--blast_database", help="Path to the local nt blast database. This pipeline requires you to have a local copy of the nt database. See https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Web&PAGE_TYPE=BlastDocs&DOC_TYPE=Download to install a local nt database.", action="store", dest="db")
-required.add_argument("-s", "--host_genome", help="Path to the host reference genome to remove host reads", action="store", dest="host_genome")
-required.add_argument("-a", "--adapters", help="Path to the file containing adapter reads for removal from sequence reads", action="store", dest="adapters")
+required.add_argument("-q", "--fastq-dir", required=True, help="Path to a directory with your ion-torrent or single end fastq files.", action="store", dest="reads_dir", type=os.path.abspath)
+required.add_argument("-o", "--output-directory", required=True, help="Path to the output directory. A directory will be created if one does not exist.", action="store", dest="outdir", type=os.path.abspath)
+required.add_argument("-b", "--blast_database", help="Path to the local nt blast database. This pipeline requires you to have a local copy of the nt database. See https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Web&PAGE_TYPE=BlastDocs&DOC_TYPE=Download to install a local nt database.", action="store", dest="db", type=os.path.abspath)
+required.add_argument("-s", "--host_genome", help="Path to the host reference genome to remove host reads", action="store", dest="host_genome", type=os.path.abspath)
+required.add_argument("-a", "--adapters", help="Path to the file containing adapter reads for removal from sequence reads", action="store", dest="adapters", type=os.path.abspath)
 optional.add_argument("-t", "--threads", help="Number of threads to use for multiprocessing.", action="store", dest="threads", type=int, default=1)
+optional.add_argument("-p", "--paired_end", help="Reads are sourced from an Illumina instrument rather than an Ion Torrent and are paired-end. Note that these files must end with n.fastq(.gz), where n=1,2", action="store_true", dest="paired_end", default=False)
+optional.add_argument("-i", "--interleaved", help="Reads are sourced from an Illumina instrument rather than an Ion Torrent and are paired-end interleaved.", action="store_true", dest="interleaved", default=False)
 optional.add_argument("-m", "--max_memory", help="Maximum amount of RAM to assign to the pipeline in GB (Just the number).", action="store", dest="mem", type=int, default=8)
 optional.add_argument("-f", "--force", help="Overwrite files in the output directories.", action='store_true', default=False)
 optional.add_argument('--version', action='version', version='%(prog)s 0.1')
@@ -49,7 +51,28 @@ if not find_executable("cutadapt"):
 if not find_executable("parallel"):
 	print "parallel not found. Please install GNU parallel."
 	sys.exit(1)
+if not find_executable("reformat.sh"):
+	print "reformat.sh not found. Please install BBMap."
+	sys.exit(1)
 
+# generate krona additional files if not there.
+ktpath = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[0]))), 'opt', 'krona')
+ktaccpath = os.path.join(ktpath, 'taxonomy', 'all.accession2taxid.sorted')
+update_tax_path = os.path.join(ktpath, 'updateTaxonomy.sh')
+update_acc_path = os.path.join(ktpath, 'updateAccessions.sh')
+if not os.path.isfile(ktaccpath):
+	virseaqc.run_command([update_tax_path])
+	virseaqc.run_command([update_acc_path])
+
+if args.interleaved==True and args.paired_end==True:
+	data_type = "Paired: interleaved"
+elif args.interleaved==False and args.paired_end==True:
+	data_type = "Paired: seperate files"
+elif args.interleaved==True and args.paired_end==False:
+	print "ERROR: fastq files cannot be interleaved without being paired."
+	sys.exit(1)
+else:
+	data_type = "Single end"
 
 print "Running virseaqc with the following options:"
 print "Reads directory = {}".format(args.reads_dir)
@@ -59,7 +82,7 @@ print "host genome = {}".format(args.host_genome)
 print "adapter file = {}".format(args.adapters)
 print "threads = {}".format(args.threads)
 print "max_memory = {}".format(args.mem)
+print "fastq data type = {}".format(data_type)
 print "Force overwrite of previous output: {}\n".format(args.force)
 
-virseaqc.run(args.threads, args.mem, os.path.abspath(args.reads_dir), args.force, os.path.abspath(args.outdir), args.verbose, args.db, args.host_genome, args.adapters)
-
+virseaqc.run(**vars(args))

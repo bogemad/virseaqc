@@ -6,10 +6,10 @@ def read(fname):
 
 setup(
     name = "virseaqc",
-    version = "0.1",
+    version = "0.2",
     author = "Daniel Bogema",
     author_email = "daniel.bogema@dpi.nsw.gov.au",
-    description = ("A combined pipeline for VIRal genome SEarching, Assembly, and Quality Control on Ion-Torrent instruments."),
+    description = ("A combined pipeline for VIRal genome SEarching, Assembly, and Quality Control."),
     license = "GPL-3.0",
     keywords = "genomics assembly searching quality control",
     url = "https://github.com/bogemad/virseaqc",
