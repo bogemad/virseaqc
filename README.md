@@ -1,7 +1,8 @@
 # virseaqc
 virseaqc - A combined pipeline for VIRal genome SEarching, Assembly, and Quality Control on Ion-Torrent instruments.
 
-```usage: virseaqc [-h] -q READS_DIR -o OUTDIR [-b DB] [-s HOST_GENOME]
+```
+usage: virseaqc [-h] -q READS_DIR -o OUTDIR [-b DB] [-s HOST_GENOME]
                 [-a ADAPTERS] [-t THREADS] [-p] [-i] [-m MEM] [-f] [--version]
                 [-v]
 
