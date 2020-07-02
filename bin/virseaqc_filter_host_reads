@@ -5,13 +5,13 @@ output=$2
 threads=$3
 
 if [[ "$4" == "False" ]]; then
-bowtie2 --threads $threads -x $host_genome_index -U $6 | samtools bam2fq -f 4 - | pigz -p $threads -c > $output.host_filtered.fastq.gz 
+bowtie2 --threads $threads -x $host_genome_index -U $6 | samtools bam2fq -f 4 -F 256 - | pigz -p $threads -c > $output.host_filtered.fastq.gz 
 else
 if [[ "$5" == "False" ]]; then
-bowtie2 --threads $threads -x $host_genome_index -1 $6 -2 $7 | samtools bam2fq -f 4 -1 $output.host_filtered_1.fastq.gz -2 $output.host_filtered_2.fastq.gz -s $output.host_filtered_singletons.fastq.gz -
+bowtie2 --threads $threads -x $host_genome_index -1 $6 -2 $7 | samtools bam2fq -f 12 -F 256 -1 $output.host_filtered_1.fastq.gz -2 $output.host_filtered_2.fastq.gz -s $output.host_filtered_singletons.fastq.gz -
 reformat.sh in=$output.host_filtered_1.fastq.gz in2=$output.host_filtered_2.fastq.gz out=$output.host_filtered.fastq.gz && rm $output.host_filtered_1.fastq.gz $output.host_filtered_2.fastq.gz $output.host_filtered_singletons.fastq.gz
 else
-bowtie2 --threads $threads -x $host_genome_index --interleaved $6 | samtools bam2fq -f 4 -1 $output.host_filtered_1.fastq.gz -2 $output.host_filtered_2.fastq.gz -s $output.host_filtered_singletons.fastq.gz -
+bowtie2 --threads $threads -x $host_genome_index --interleaved $6 | samtools bam2fq -f 12 -F 256 -1 $output.host_filtered_1.fastq.gz -2 $output.host_filtered_2.fastq.gz -s $output.host_filtered_singletons.fastq.gz -
 reformat.sh in=$output.host_filtered_1.fastq.gz in2=$output.host_filtered_2.fastq.gz out=$output.host_filtered.fastq.gz && rm $output.host_filtered_1.fastq.gz $output.host_filtered_2.fastq.gz $output.host_filtered_singletons.fastq.gz
 fi
 fi
